@@ -47,6 +47,14 @@ class JansenParameters(BaseModel):
     coupler_length: float = Field(default=300.0, description="连杆长度 (mm)")
     ground_link: float = Field(default=200.0, description="机架长度 (mm)")
     crank_speed: float = Field(default=30.0, description="曲柄转速 (°/s)")
+    payload_mass: float = Field(default=0.0, description="负载质量 (kg)")
+    payload_offset_x: float = Field(default=0.0, description="负载X方向偏移 (mm)")
+    payload_offset_y: float = Field(default=0.0, description="负载Y方向偏移 (mm)")
+    payload_offset_z: float = Field(default=0.0, description="负载Z方向偏移 (mm)")
+    friction_coefficient: float = Field(default=0.6, description="足端摩擦系数 (0.3-0.8)")
+    ground_stiffness: float = Field(default=1e6, description="地面刚度 (N/m)")
+    damping_coefficient: float = Field(default=100.0, description="地面阻尼系数 (N·s/m)")
+    foot_radius: float = Field(default=15.0, description="足端半径 (mm)")
 
 
 class LegPosition(BaseModel):
@@ -56,11 +64,37 @@ class LegPosition(BaseModel):
     foot: Point3D
 
 
+class GroundContactState(BaseModel):
+    is_contact: bool = Field(description="是否接触地面")
+    contact_depth: float = Field(description="接触深度 (mm)")
+    normal_force: float = Field(description="法向接触力 (N)")
+    tangential_force: float = Field(description="切向接触力 (N)")
+    friction_force: float = Field(description="最大静摩擦力 (N)")
+    is_slipping: bool = Field(description="是否打滑")
+    slip_velocity: Point3D = Field(description="打滑速度 (mm/s)")
+    slip_distance: float = Field(description="累计打滑距离 (mm)")
+    contact_area: float = Field(description="接触面积 (mm²)")
+    pressure_distribution: float = Field(description="压力分布系数")
+
+
+class COMAdjustmentState(BaseModel):
+    target_com: Point3D = Field(description="目标重心位置")
+    current_com: Point3D = Field(description="当前重心位置")
+    adjustment_offset: Point3D = Field(description="重心调整偏移量")
+    payload_mass: float = Field(description="当前负载质量 (kg)")
+    body_inclination_compensation: float = Field(description="机身倾角补偿角 (°)")
+    adjustment_factor: float = Field(description="调整因子 (0-1)")
+    is_adjusting: bool = Field(description="是否正在调整")
+    adjustment_remaining: float = Field(description="剩余调整量 (mm)")
+
+
 class LinkageState(BaseModel):
     crank_angle: float
     joint_positions: List[Point3D]
     leg_position: LegPosition
     foot_velocity: Point3D
+    ground_contact: Optional[GroundContactState] = None
+    com_adjustment: Optional[COMAdjustmentState] = None
 
 
 class GaitAnalysisResult(BaseModel):
