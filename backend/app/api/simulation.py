@@ -1,21 +1,43 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Body
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List, Dict
 import logging
+from pydantic import BaseModel, Field
 
 from app.models.schemas import (
     JansenParameters,
     GaitAnalysisResult,
     GaitSimulationRequest,
     LinkageState,
-    Point3D
+    Point3D,
+    GroundContactState,
+    COMAdjustmentState
 )
 from app.simulation.jansen_linkage import JansenLinkageSolver
+from app.simulation.multibody_dynamics import MultibodyDynamics
 from app.simulation.gait_engine import GaitEngine
 from app.core.database import influx_db
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/simulation", tags=["仿真计算"])
+
+
+class GroundContactRequest(BaseModel):
+    crank_angle: float = Field(..., ge=0, le=360, description="曲柄转角")
+    ground_elevation: float = Field(0.0, description="地面标高 (mm)")
+    terrain_type: str = Field("normal", description="地形类型")
+    total_mass: float = Field(35.0, description="总质量 (kg)")
+    num_support_legs: int = Field(2, description="支撑腿数量")
+    parameters: JansenParameters
+
+
+class COMAdjustmentRequest(BaseModel):
+    crank_angle: float = Field(..., ge=0, le=360, description="曲柄转角")
+    body_inclination: float = Field(0.0, description="机身倾角")
+    payload_mass: float = Field(0.0, description="负载质量 (kg)")
+    payload_offset: Point3D = Field(default_factory=lambda: Point3D(x=0, y=0, z=0))
+    num_support_legs: int = Field(2, description="支撑腿数量")
+    parameters: JansenParameters
 
 
 @router.post("/gait", response_model=GaitAnalysisResult, summary="计算步态参数")
@@ -219,3 +241,123 @@ async def optimize_parameters(
     except Exception as e:
         logger.error(f"参数优化失败: {e}")
         raise HTTPException(status_code=500, detail=f"优化失败: {str(e)}")
+
+
+@router.post("/ground-contact", response_model=GroundContactState, summary="计算地面接触状态")
+async def compute_ground_contact(request: GroundContactRequest):
+    try:
+        request.parameters.friction_coefficient = JansenLinkageSolver(request.parameters).get_terrain_friction_coefficient(request.terrain_type)
+        
+        solver = JansenLinkageSolver(request.parameters)
+        joints = solver.solve_linkage(request.crank_angle)
+        foot_vel = solver.calculate_foot_velocity(request.crank_angle)
+        
+        ground_contact = solver.calculate_ground_contact(
+            joints=joints,
+            foot_velocity=foot_vel,
+            ground_elevation=request.ground_elevation,
+            total_mass=request.total_mass,
+            num_support_legs=request.num_support_legs
+        )
+        
+        return ground_contact
+    except Exception as e:
+        logger.error(f"地面接触计算失败: {e}")
+        raise HTTPException(status_code=500, detail=f"地面接触计算失败: {str(e)}")
+
+
+@router.post("/com-adjustment", response_model=LinkageState, summary="变重心控制计算")
+async def compute_com_adjustment(request: COMAdjustmentRequest):
+    try:
+        request.parameters.payload_mass = request.payload_mass
+        request.parameters.payload_offset_x = request.payload_offset.x
+        request.parameters.payload_offset_y = request.payload_offset.y
+        request.parameters.payload_offset_z = request.payload_offset.z
+        
+        solver = JansenLinkageSolver(request.parameters)
+        dynamics = MultibodyDynamics(request.parameters)
+        
+        linkage_state = solver.get_linkage_state(
+            crank_angle=request.crank_angle,
+            total_mass=35.0 + request.payload_mass,
+            num_support_legs=request.num_support_legs
+        )
+        
+        adjusted_state = dynamics.update_linkage_state_with_com(
+            linkage_state=linkage_state,
+            body_inclination=request.body_inclination,
+            num_support_legs=request.num_support_legs
+        )
+        
+        return adjusted_state
+    except Exception as e:
+        logger.error(f"重心调整计算失败: {e}")
+        raise HTTPException(status_code=500, detail=f"重心调整计算失败: {str(e)}")
+
+
+@router.get("/friction-coefficients", summary="获取地形摩擦系数表")
+async def get_friction_coefficients():
+    try:
+        return {
+            "ice": 0.1,
+            "mud": 0.3,
+            "wet_grass": 0.35,
+            "gravel": 0.5,
+            "normal": 0.6,
+            "dry_grass": 0.65,
+            "wood": 0.7,
+            "concrete": 0.8,
+            "rubber": 0.9
+        }
+    except Exception as e:
+        logger.error(f"获取摩擦系数失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/linkage-with-effects", response_model=LinkageState, summary="计算带地面接触和重心调整的连杆状态")
+async def compute_linkage_with_effects(
+    crank_angle: float = Query(..., ge=0, le=360),
+    ground_elevation: float = Query(0.0),
+    terrain_type: str = Query("normal"),
+    body_inclination: float = Query(0.0),
+    payload_mass: float = Query(0.0),
+    payload_offset_x: float = Query(0.0),
+    payload_offset_y: float = Query(0.0),
+    payload_offset_z: float = Query(0.0),
+    num_support_legs: int = Query(2),
+    parameters: JansenParameters = None
+):
+    try:
+        if parameters is None:
+            parameters = JansenParameters()
+        
+        parameters.friction_coefficient = JansenLinkageSolver(parameters).get_terrain_friction_coefficient(terrain_type)
+        parameters.payload_mass = payload_mass
+        parameters.payload_offset_x = payload_offset_x
+        parameters.payload_offset_y = payload_offset_y
+        parameters.payload_offset_z = payload_offset_z
+        
+        solver = JansenLinkageSolver(parameters)
+        dynamics = MultibodyDynamics(parameters)
+        
+        total_mass = 35.0 + payload_mass
+        
+        linkage_state = solver.get_linkage_state(
+            crank_angle=crank_angle,
+            ground_elevation=ground_elevation,
+            terrain_type=terrain_type,
+            total_mass=total_mass,
+            num_support_legs=num_support_legs
+        )
+        
+        adjusted_state = dynamics.update_linkage_state_with_com(
+            linkage_state=linkage_state,
+            body_inclination=body_inclination,
+            num_support_legs=num_support_legs
+        )
+        
+        return adjusted_state
+    except Exception as e:
+        logger.error(f"连杆状态计算失败: {e}")
+        raise HTTPException(status_code=500, detail=f"计算失败: {str(e)}")
+
