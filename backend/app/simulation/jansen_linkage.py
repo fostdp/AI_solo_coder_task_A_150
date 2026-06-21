@@ -1,8 +1,10 @@
 import numpy as np
-from typing import Tuple, List, Dict
+from typing import Tuple, List, Dict, Optional
 import math
 
-from app.models.schemas import JansenParameters, Point3D, LegPosition, LinkageState
+from app.models.schemas import (
+    JansenParameters, Point3D, LegPosition, LinkageState, GroundContactState
+)
 
 
 class JansenLinkageSolver:
@@ -19,6 +21,8 @@ class JansenLinkageSolver:
             'ankle_joint',
             'foot_tip'
         ]
+        self._cumulative_slip_distance = 0.0
+        self._last_foot_position: Optional[Point3D] = None
 
     def solve_linkage(self, crank_angle_deg: float) -> Dict[str, Point3D]:
         a = self.params.crank_length
@@ -229,3 +233,173 @@ class JansenLinkageSolver:
                 joints['knee_joint'], joints['ankle_joint'], joints['foot_tip']
             )
         }
+
+    def calculate_ground_contact(
+        self,
+        joints: Dict[str, Point3D],
+        foot_velocity: Point3D,
+        ground_elevation: float = 0.0,
+        terrain_normal: Point3D = Point3D(x=0.0, y=1.0, z=0.0),
+        total_mass: float = 35.0,
+        num_support_legs: int = 2
+    ) -> GroundContactState:
+        foot = joints['foot_tip']
+        foot_radius = self.params.foot_radius
+
+        penetration = (ground_elevation + foot_radius) - foot.y
+        is_contact = penetration > 0
+
+        if not is_contact:
+            return GroundContactState(
+                is_contact=False,
+                contact_depth=0.0,
+                normal_force=0.0,
+                tangential_force=0.0,
+                friction_force=0.0,
+                is_slipping=False,
+                slip_velocity=Point3D(x=0.0, y=0.0, z=0.0),
+                slip_distance=0.0,
+                contact_area=0.0,
+                pressure_distribution=0.0
+            )
+
+        contact_depth = max(0.0, penetration)
+
+        k = self.params.ground_stiffness
+        c = self.params.damping_coefficient
+        contact_depth_m = contact_depth / 1000.0
+        foot_velocity_y_m_s = foot_velocity.y / 1000.0
+
+        normal_force_spring = k * contact_depth_m
+        normal_force_damper = c * max(0.0, -foot_velocity_y_m_s)
+        normal_force = normal_force_spring + normal_force_damper
+
+        mass_per_leg = total_mass / num_support_legs
+        static_normal_force = mass_per_leg * 9.81
+        normal_force = max(normal_force, static_normal_force)
+
+        friction_coeff = self.params.friction_coefficient
+        max_friction_force = friction_coeff * normal_force
+
+        foot_velocity_x = foot_velocity.x / 1000.0
+        foot_velocity_z = foot_velocity.z / 1000.0
+        tangential_speed = np.sqrt(foot_velocity_x**2 + foot_velocity_z**2)
+
+        if tangential_speed > 1e-6:
+            tangential_force_magnitude = c * tangential_speed * 0.1
+        else:
+            tangential_force_magnitude = 0.0
+
+        is_slipping = tangential_force_magnitude > max_friction_force
+
+        if is_slipping:
+            tangential_force = max_friction_force * 0.9
+            slip_velocity_x = foot_velocity.x * 0.3
+            slip_velocity_y = foot_velocity.y * 0.1
+            slip_velocity_z = foot_velocity.z * 0.3
+
+            if self._last_foot_position is not None:
+                dx = foot.x - self._last_foot_position.x
+                dz = foot.z - self._last_foot_position.z
+                self._cumulative_slip_distance += np.sqrt(dx**2 + dz**2) * 0.3
+        else:
+            tangential_force = tangential_force_magnitude
+            slip_velocity_x = 0.0
+            slip_velocity_y = 0.0
+            slip_velocity_z = 0.0
+
+        self._last_foot_position = foot
+
+        contact_area = np.pi * (foot_radius**2) * (1 + contact_depth / (foot_radius * 2))
+        pressure_distribution = normal_force / contact_area
+
+        return GroundContactState(
+            is_contact=True,
+            contact_depth=contact_depth,
+            normal_force=normal_force,
+            tangential_force=tangential_force,
+            friction_force=max_friction_force,
+            is_slipping=is_slipping,
+            slip_velocity=Point3D(x=slip_velocity_x, y=slip_velocity_y, z=slip_velocity_z),
+            slip_distance=self._cumulative_slip_distance,
+            contact_area=contact_area,
+            pressure_distribution=pressure_distribution
+        )
+
+    def apply_slip_correction(
+        self,
+        joints: Dict[str, Point3D],
+        ground_contact: GroundContactState
+    ) -> Dict[str, Point3D]:
+        if not ground_contact.is_slipping:
+            return joints
+
+        slip_x = ground_contact.slip_velocity.x * 0.01
+        slip_z = ground_contact.slip_velocity.z * 0.01
+
+        corrected_joints = {}
+        for name, point in joints.items():
+            corrected_joints[name] = Point3D(
+                x=point.x - slip_x,
+                y=point.y,
+                z=point.z - slip_z
+            )
+
+        return corrected_joints
+
+    def get_terrain_friction_coefficient(
+        self,
+        terrain_type: str = 'normal'
+    ) -> float:
+        friction_table = {
+            'ice': 0.1,
+            'mud': 0.3,
+            'wet_grass': 0.35,
+            'gravel': 0.5,
+            'normal': 0.6,
+            'dry_grass': 0.65,
+            'wood': 0.7,
+            'concrete': 0.8,
+            'rubber': 0.9
+        }
+        return friction_table.get(terrain_type, 0.6)
+
+    def get_linkage_state(
+        self,
+        crank_angle: float,
+        ground_elevation: float = 0.0,
+        terrain_type: str = 'normal',
+        total_mass: float = 35.0,
+        num_support_legs: int = 2
+    ) -> LinkageState:
+        joints = self.solve_linkage(crank_angle)
+        leg_pos = self.calculate_leg_position(joints)
+        foot_vel = self.calculate_foot_velocity(crank_angle)
+
+        self.params.friction_coefficient = self.get_terrain_friction_coefficient(terrain_type)
+
+        ground_contact = self.calculate_ground_contact(
+            joints=joints,
+            foot_velocity=foot_vel,
+            ground_elevation=ground_elevation,
+            total_mass=total_mass,
+            num_support_legs=num_support_legs
+        )
+
+        if ground_contact.is_slipping:
+            joints = self.apply_slip_correction(joints, ground_contact)
+            leg_pos = self.calculate_leg_position(joints)
+
+        joint_positions = [joints[name] for name in self.joint_names]
+
+        return LinkageState(
+            crank_angle=crank_angle,
+            joint_positions=joint_positions,
+            leg_position=leg_pos,
+            foot_velocity=foot_vel,
+            ground_contact=ground_contact
+        )
+
+    def reset_slip_tracking(self):
+        self._cumulative_slip_distance = 0.0
+        self._last_foot_position = None
