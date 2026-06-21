@@ -2,7 +2,8 @@ import axios from 'axios'
 import type {
   SensorData, Alert, GaitAnalysisResult, ObstacleAssessmentResult,
   ObstacleAssessmentRequest, LinkageState, JansenParameters,
-  StabilityAnalysisResult
+  StabilityAnalysisResult, GroundContactState, COMAdjustmentState,
+  TerrainType, Point3D
 } from '@/types'
 
 const api = axios.create({
@@ -72,6 +73,43 @@ export const simulationApi = {
         terrain_roughness: roughness,
       },
     }),
+
+  computeGroundContact: (request: {
+    crank_angle: number
+    ground_elevation?: number
+    terrain_type?: TerrainType
+    total_mass?: number
+    num_support_legs?: number
+    parameters: JansenParameters
+  }) =>
+    api.post<GroundContactState>('/simulation/ground-contact', request),
+
+  computeCOMAdjustment: (request: {
+    crank_angle: number
+    body_inclination?: number
+    payload_mass?: number
+    payload_offset?: Point3D
+    num_support_legs?: number
+    parameters: JansenParameters
+  }) =>
+    api.post<LinkageState>('/simulation/com-adjustment', request),
+
+  getFrictionCoefficients: () =>
+    api.get<Record<TerrainType, number>>('/simulation/friction-coefficients'),
+
+  getLinkageWithEffects: (params: {
+    crank_angle: number
+    ground_elevation?: number
+    terrain_type?: TerrainType
+    body_inclination?: number
+    payload_mass?: number
+    payload_offset_x?: number
+    payload_offset_y?: number
+    payload_offset_z?: number
+    num_support_legs?: number
+    parameters?: JansenParameters
+  }) =>
+    api.post<LinkageState>('/simulation/linkage-with-effects', null, { params }),
 }
 
 export const analysisApi = {
