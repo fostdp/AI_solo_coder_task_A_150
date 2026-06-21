@@ -26,6 +26,38 @@ export interface JansenParameters {
   crank_speed: number
   body_mass: number
   leg_mass: number
+  payload_mass: number
+  payload_offset_x: number
+  payload_offset_y: number
+  payload_offset_z: number
+  friction_coefficient: number
+  ground_stiffness: number
+  damping_coefficient: number
+  foot_radius: number
+}
+
+export interface GroundContactState {
+  is_contact: boolean
+  contact_depth: number
+  normal_force: number
+  tangential_force: number
+  friction_force: number
+  is_slipping: boolean
+  slip_velocity: Point3D
+  slip_distance: number
+  contact_area: number
+  pressure_distribution: number
+}
+
+export interface COMAdjustmentState {
+  target_com: Point3D
+  current_com: Point3D
+  adjustment_offset: Point3D
+  payload_mass: number
+  body_inclination_compensation: number
+  adjustment_factor: number
+  is_adjusting: boolean
+  adjustment_remaining: number
 }
 
 export interface LinkageState {
@@ -34,7 +66,11 @@ export interface LinkageState {
   foot_position: Point3D
   link_angles: Record<string, number>
   is_singular: boolean
+  ground_contact?: GroundContactState
+  com_adjustment?: COMAdjustmentState
 }
+
+export type TerrainType = 'ice' | 'mud' | 'wet_grass' | 'gravel' | 'normal' | 'dry_grass' | 'wood' | 'concrete' | 'rubber'
 
 export interface GaitAnalysisResult {
   device_id: string
