@@ -4,7 +4,9 @@ from scipy.integrate import odeint
 from scipy.optimize import minimize
 import math
 
-from app.models.schemas import JansenParameters, Point3D, Point2D
+from app.models.schemas import (
+    JansenParameters, Point3D, Point2D, COMAdjustmentState, GroundContactState
+)
 from .jansen_linkage import JansenLinkageSolver
 
 
@@ -20,7 +22,8 @@ class MultibodyDynamics:
             'coupler': 1.8,
             'thigh': 1.2,
             'shin': 0.8,
-            'foot': 0.5
+            'foot': 0.5,
+            'payload': 0.0
         }
         
         self.gravity = 9.81
@@ -30,10 +33,20 @@ class MultibodyDynamics:
             'width': 300.0,
             'height': 400.0
         }
+        
+        self.com_adjustment_config = {
+            'max_adjustment_speed': 50.0,
+            'adjustment_gain': 0.5,
+            'stability_threshold': 50.0,
+            'min_adjustment_margin': 5.0,
+            'payload_center_height': 300.0
+        }
 
     def calculate_link_centers_of_mass(
         self,
-        joints: Dict[str, Point3D]
+        joints: Dict[str, Point3D],
+        payload_mass: Optional[float] = None,
+        payload_offset: Optional[Point3D] = None
     ) -> Dict[str, Point3D]:
         com_positions = {}
         
@@ -77,6 +90,24 @@ class MultibodyDynamics:
             x=(joints['crank_pivot'].x + joints['rocker_pivot'].x) / 2,
             y=self.body_dimensions['height'] / 2,
             z=0.0
+        )
+        
+        if payload_mass is None:
+            payload_mass = self.params.payload_mass
+        if payload_offset is None:
+            payload_offset = Point3D(
+                x=self.params.payload_offset_x,
+                y=self.params.payload_offset_y,
+                z=self.params.payload_offset_z
+            )
+        
+        self.mass_properties['payload'] = payload_mass
+        
+        body_com = com_positions['body']
+        com_positions['payload'] = Point3D(
+            x=body_com.x + payload_offset.x,
+            y=body_com.y + self.com_adjustment_config['payload_center_height'] + payload_offset.y,
+            z=body_com.z + payload_offset.z
         )
         
         return com_positions
@@ -388,3 +419,187 @@ class MultibodyDynamics:
             results['ground_contact'].append(is_ground_contact)
         
         return results
+
+    def calculate_target_com(
+        self,
+        support_polygon: List[Point2D],
+        current_com: Point3D,
+        payload_mass: float
+    ) -> Point3D:
+        if len(support_polygon) < 3:
+            return current_com
+
+        poly_x = [p.x for p in support_polygon]
+        poly_y = [p.y for p in support_polygon]
+        centroid_x = sum(poly_x) / len(poly_x)
+        centroid_y = sum(poly_y) / len(poly_y)
+
+        base_mass = sum(v for k, v in self.mass_properties.items() if k != 'payload')
+        total_mass = base_mass + payload_mass
+        mass_ratio = payload_mass / total_mass if total_mass > 0 else 0
+
+        target_x = centroid_x * (1 - mass_ratio * 0.3)
+        target_z = centroid_y * (1 - mass_ratio * 0.3)
+        target_y = current_com.y * (1 - mass_ratio * 0.1)
+
+        return Point3D(x=target_x, y=target_y, z=target_z)
+
+    def calculate_com_adjustment(
+        self,
+        current_com: Point3D,
+        target_com: Point3D,
+        current_stability_margin: float,
+        body_inclination: float = 0.0,
+        dt: float = 0.01
+    ) -> COMAdjustmentState:
+        payload_mass = self.params.payload_mass
+
+        dx = target_com.x - current_com.x
+        dy = target_com.y - current_com.y
+        dz = target_com.z - current_com.z
+
+        distance = np.sqrt(dx**2 + dy**2 + dz**2)
+
+        stability_threshold = self.com_adjustment_config['stability_threshold']
+        adjustment_gain = self.com_adjustment_config['adjustment_gain']
+        max_speed = self.com_adjustment_config['max_adjustment_speed']
+
+        if current_stability_margin < stability_threshold:
+            urgency_factor = 1.0 + (stability_threshold - current_stability_margin) / stability_threshold
+        else:
+            urgency_factor = 1.0
+
+        adjustment_factor = min(1.0, adjustment_gain * urgency_factor * dt * 10)
+
+        if distance < self.com_adjustment_config['min_adjustment_margin']:
+            adjustment_offset = Point3D(x=0.0, y=0.0, z=0.0)
+            is_adjusting = False
+            adjustment_remaining = 0.0
+        else:
+            max_adjustment = max_speed * dt
+            adjustment_magnitude = min(distance * adjustment_factor, max_adjustment)
+
+            if distance > 1e-6:
+                nx = dx / distance
+                ny = dy / distance
+                nz = dz / distance
+            else:
+                nx, ny, nz = 0.0, 0.0, 0.0
+
+            adjustment_offset = Point3D(
+                x=adjustment_magnitude * nx,
+                y=adjustment_magnitude * ny,
+                z=adjustment_magnitude * nz
+            )
+            is_adjusting = True
+            adjustment_remaining = distance - adjustment_magnitude
+
+        inclination_compensation = body_inclination * adjustment_factor * 0.5
+
+        return COMAdjustmentState(
+            target_com=target_com,
+            current_com=current_com,
+            adjustment_offset=adjustment_offset,
+            payload_mass=payload_mass,
+            body_inclination_compensation=inclination_compensation,
+            adjustment_factor=adjustment_factor,
+            is_adjusting=is_adjusting,
+            adjustment_remaining=adjustment_remaining
+        )
+
+    def apply_com_adjustment(
+        self,
+        com_positions: Dict[str, Point3D],
+        com_adjustment: COMAdjustmentState
+    ) -> Dict[str, Point3D]:
+        if not com_adjustment.is_adjusting:
+            return com_positions
+
+        offset = com_adjustment.adjustment_offset
+
+        adjusted_positions = {}
+        for name, pos in com_positions.items():
+            if name in ['body', 'payload']:
+                adjusted_positions[name] = Point3D(
+                    x=pos.x + offset.x,
+                    y=pos.y + offset.y,
+                    z=pos.z + offset.z
+                )
+            else:
+                adjusted_positions[name] = pos
+
+        return adjusted_positions
+
+    def compensate_body_inclination(
+        self,
+        joints: Dict[str, Point3D],
+        com_adjustment: COMAdjustmentState
+    ) -> Dict[str, Point3D]:
+        compensation_angle = com_adjustment.body_inclination_compensation
+        if abs(compensation_angle) < 0.1:
+            return joints
+
+        compensation_rad = np.radians(compensation_angle)
+        rotation_matrix = np.array([
+            [np.cos(compensation_rad), -np.sin(compensation_rad)],
+            [np.sin(compensation_rad), np.cos(compensation_rad)]
+        ])
+
+        pivot = joints['crank_pivot']
+
+        compensated_joints = {}
+        for name, point in joints.items():
+            dx = point.x - pivot.x
+            dy = point.y - pivot.y
+
+            rotated = rotation_matrix @ np.array([dx, dy])
+
+            compensated_joints[name] = Point3D(
+                x=pivot.x + rotated[0],
+                y=pivot.y + rotated[1],
+                z=point.z
+            )
+
+        return compensated_joints
+
+    def update_linkage_state_with_com(
+        self,
+        linkage_state,
+        body_inclination: float = 0.0,
+        num_support_legs: int = 2
+    ):
+        joints_dict = dict(zip(
+            self.linkage_solver.joint_names,
+            linkage_state.joint_positions
+        ))
+
+        support_polygon = self.calculate_support_polygon(joints_dict, num_legs=num_support_legs)
+
+        com_positions = self.calculate_link_centers_of_mass(joints_dict)
+        current_com = self.calculate_total_center_of_mass(com_positions, body_inclination)
+
+        forces = self.calculate_joint_forces(joints_dict, com_positions, body_inclination)
+        zmp = self.calculate_zero_moment_point(current_com, forces, joints_dict, body_inclination)
+        stability_margin = self.calculate_stability_margin(zmp, support_polygon)
+
+        target_com = self.calculate_target_com(support_polygon, current_com, self.params.payload_mass)
+
+        com_adjustment = self.calculate_com_adjustment(
+            current_com=current_com,
+            target_com=target_com,
+            current_stability_margin=stability_margin,
+            body_inclination=body_inclination
+        )
+
+        adjusted_com_positions = self.apply_com_adjustment(com_positions, com_adjustment)
+        adjusted_joints = self.compensate_body_inclination(joints_dict, com_adjustment)
+
+        adjusted_com = self.calculate_total_center_of_mass(adjusted_com_positions, body_inclination)
+
+        linkage_state.joint_positions = [adjusted_joints[name] for name in self.linkage_solver.joint_names]
+        linkage_state.com_adjustment = com_adjustment
+
+        leg_pos = self.linkage_solver.calculate_leg_position(adjusted_joints)
+        linkage_state.leg_position = leg_pos
+
+        return linkage_state
