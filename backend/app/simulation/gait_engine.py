@@ -58,16 +58,24 @@ class GaitEngine:
         
         linkage_state = self.linkage_solver.get_linkage_state(crank_angle)
         
+        phase_info = self.get_gait_phase(crank_angle)
+        walking_speed = (stride_length * cadence) / 60.0 if cadence > 0 else 0.0
+
         return GaitAnalysisResult(
             timestamp=datetime.utcnow(),
             device_id=device_id,
             stride_length=stride_length,
             cadence=cadence,
+            walking_speed=walking_speed,
             support_phase=support_phase_ratio,
             swing_phase=swing_phase_ratio,
+            gait_symmetry=1.0,
             com_trajectory=com_trajectory,
             zmp_trajectory=zmp_trajectory,
-            stability_margin=float(avg_stability),
+            stability_margin=float(avg_stability) if not np.isnan(avg_stability) else 0.0,
+            gait_phase=phase_info.get('gait_cycle_percentage', 0.0) / 100.0,
+            phase_name=phase_info.get('phase_name', 'support'),
+            is_support_phase=phase_info.get('is_support_phase', True),
             linkage_state=linkage_state
         )
 

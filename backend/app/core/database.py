@@ -211,6 +211,20 @@ class RedisManager:
                 return value
         return None
 
+    async def publish(self, channel: str, message: str) -> int:
+        try:
+            if not self.redis:
+                await self._connect()
+            return await self.redis.publish(channel, message)
+        except Exception as e:
+            logger.error(f"Redis发布消息失败: channel={channel}, error={e}")
+            return 0
+
+    async def get_pubsub(self):
+        if not self.redis:
+            await self._connect()
+        return self.redis.pubsub()
+
     async def close(self):
         if self.redis:
             await self.redis.close()

@@ -38,17 +38,18 @@ services:
       timeout: 5s
       retries: 5
 
-  backend:
+  modbus-receiver:
     build: ./backend
-    container_name: woodox-backend
-    ports:
-      - "8000:8000"
+    container_name: woodox-modbus-receiver
+    working_dir: /app
+    command: python -m microservices.modbus_receiver
     environment:
       - INFLUXDB_URL=http://influxdb:8086
       - INFLUXDB_TOKEN=woodox-secret-token-2024
       - INFLUXDB_ORG=wood-ox-research
       - INFLUXDB_BUCKET=sensor_raw
       - REDIS_URL=redis://redis:6379/0
+      - CONFIG_DIR=/app/config
       - APP_ENV=production
     depends_on:
       influxdb:
@@ -57,7 +58,127 @@ services:
         condition: service_healthy
     volumes:
       - ./backend:/app
+      - ./config:/app/config
     restart: unless-stopped
+    profiles:
+      - distributed
+
+  walking-simulator:
+    build: ./backend
+    container_name: woodox-walking-simulator
+    working_dir: /app
+    command: python -m microservices.walking_simulator
+    environment:
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=woodox-secret-token-2024
+      - INFLUXDB_ORG=wood-ox-research
+      - INFLUXDB_BUCKET=sensor_raw
+      - REDIS_URL=redis://redis:6379/0
+      - CONFIG_DIR=/app/config
+      - APP_ENV=production
+    depends_on:
+      influxdb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - ./config:/app/config
+    restart: unless-stopped
+    profiles:
+      - distributed
+
+  obstacle-analyzer:
+    build: ./backend
+    container_name: woodox-obstacle-analyzer
+    working_dir: /app
+    command: python -m microservices.obstacle_analyzer
+    environment:
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=woodox-secret-token-2024
+      - INFLUXDB_ORG=wood-ox-research
+      - INFLUXDB_BUCKET=sensor_raw
+      - REDIS_URL=redis://redis:6379/0
+      - CONFIG_DIR=/app/config
+      - APP_ENV=production
+    depends_on:
+      influxdb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - ./config:/app/config
+    restart: unless-stopped
+    profiles:
+      - distributed
+
+  alarm-ws:
+    build: ./backend
+    container_name: woodox-alarm-ws
+    working_dir: /app
+    command: python -m microservices.alarm_ws
+    environment:
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=woodox-secret-token-2024
+      - INFLUXDB_ORG=wood-ox-research
+      - INFLUXDB_BUCKET=sensor_raw
+      - REDIS_URL=redis://redis:6379/0
+      - CONFIG_DIR=/app/config
+      - APP_ENV=production
+    depends_on:
+      influxdb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - ./config:/app/config
+    restart: unless-stopped
+    profiles:
+      - distributed
+
+  backend:
+    build: ./backend
+    container_name: woodox-backend
+    working_dir: /app
+    command: python main.py
+    ports:
+      - "8000:8000"
+    environment:
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=woodox-secret-token-2024
+      - INFLUXDB_ORG=wood-ox-research
+      - INFLUXDB_BUCKET=sensor_raw
+      - REDIS_URL=redis://redis:6379/0
+      - CONFIG_DIR=/app/config
+      - APP_ENV=production
+    depends_on:
+      influxdb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - ./config:/app/config
+    restart: unless-stopped
+
+  frontend:
+    image: node:18-alpine
+    container_name: woodox-frontend
+    working_dir: /app
+    command: sh -c "npm install && npm run dev"
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_BASE_URL=http://localhost:8000
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend:/app
+    restart: unless-stopped
+    profiles:
+      - frontend
 
 volumes:
   influxdb-data:

@@ -102,11 +102,16 @@ class GaitAnalysisResult(BaseModel):
     device_id: str
     stride_length: float = Field(description="步幅 (mm)")
     cadence: float = Field(description="步频 (步/分钟)")
+    walking_speed: float = Field(default=0.0, description="行走速度 (mm/s)")
     support_phase: float = Field(description="支撑相比例 (%)")
     swing_phase: float = Field(description="摆动相比例 (%)")
+    gait_symmetry: float = Field(default=1.0, description="步态对称性")
     com_trajectory: List[Point3D] = Field(description="重心轨迹")
     zmp_trajectory: List[Point2D] = Field(description="零力矩点轨迹")
     stability_margin: float = Field(description="稳定裕度")
+    gait_phase: float = Field(default=0.0, description="当前步态相位 (0-1)")
+    phase_name: str = Field(default='support', description="步态相位名称")
+    is_support_phase: bool = Field(default=True, description="是否处于支撑相")
     linkage_state: Optional[LinkageState] = None
 
 
